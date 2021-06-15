@@ -1,8 +1,9 @@
 import torch
 import numpy as np 
 import scipy.sparse as sp 
+import pickle as pkl
 
-def load_data(dataset="cora"):
+def load_data(dataset="face"):
     
     print("loading {} dataset ... ". format(dataset))
 
@@ -19,6 +20,25 @@ def load_data(dataset="cora"):
         edges = np.array(list(map(idx_map.get, edges_unordered.flatten())), dtype=np.int32).reshape(edges_unordered.shape)
         adj = sp.coo_matrix((np.ones(edges.shape[0]), (edges[:,0], edges[:,1])), shape=(labels.shape[0], labels.shape[0]), dtype=np.float32)
 
+    elif dataset == 'face':
+        with open(path + 'nodes.pickle', 'rb') as f:
+            idx_features_labels = pkl.load(f)
+        with open(path + 'edges.pickle', 'rb') as f:
+            edges = pkl.load(f)
+        with open(path + 'train_indice.pickle', 'rb') as f:
+            idx_train = torch.LongTensor(pkl.load(f))
+        with open(path + 'eval_indice.pickle', 'rb') as f:
+            idx_eval = torch.LongTensor(pkl.load(f))
+        with open(path + 'test_indice.pickle', 'rb') as f:
+            idx_test = torch.LongTensor(pkl.load(f))
+        num_nodes = idx_features_labels.shape[0]
+        features =  torch.FloatTensor(normalize_features(idx_features_labels[:, 1:-20]))
+        labels = torch.FloatTensor(idx_features_labels[:, -20:])
+        idx = idx_features_labels[:, 0]
+        adj = np.zeros((num_nodes, num_nodes))
+        adj[np.tile(np.array(range(num_nodes))[:, np.newaxis], (1, 4)).reshape(-1), edges.reshape(-1)] = 1
+        adj = torch.FloatTensor(adj)
+        return  adj, features, labels, idx_train, idx_eval, idx_test
     elif dataset == 'citeseer':
         # TODO step 3.
         pass
@@ -73,11 +93,13 @@ def encode_onehot(labels):
     return labels_onehot 
 
 import random
-import matplotlib.pyplot as plt
 import torch
 import os
 import numpy as np
 import copy
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 # data manager for recording, saving, and plotting
 class AverageMeter(object):
@@ -143,7 +165,7 @@ class AverageMeter(object):
         self.listeners.append(listener)
         return listener
 
-class Listener:
+class Listener(object):
     def __init__(self):
         self.value = None
     def listen(self):
@@ -233,4 +255,41 @@ def plot_2D(args, x, y, scatter=True, surfix='.', name='noname', x_label=None, y
         plt.ylabel(y_label)
     plt.savefig(os.path.join(args.path, args.result_dir, args.name, surfix, "{}.jpg".format(name)))
     plt.close(plt.gcf())
+    
+    
+import torch
+import os
+import numpy as np
+import math
+import yaml
+import torch.nn.init as init
+import time
+#import librosa
+import cv2
+
+def drawLips(keypoints, new_img, c = (255, 255, 255), th = 1):
+
+# 	keypoints = np.int(keypoints)
+	keypoints = keypoints.astype(int)
+# 	print(keypoints)
+	for i in range(48, 59):
+		cv2.line(new_img, tuple(keypoints[i]), tuple(keypoints[i+1]), color=c, thickness=th)
+	cv2.line(new_img, tuple(keypoints[48]), tuple(keypoints[59]), color=c, thickness=th)
+	cv2.line(new_img, tuple(keypoints[48]), tuple(keypoints[60]), color=c, thickness=th)
+	cv2.line(new_img, tuple(keypoints[54]), tuple(keypoints[64]), color=c, thickness=th)
+	cv2.line(new_img, tuple(keypoints[67]), tuple(keypoints[60]), color=c, thickness=th)
+	for i in range(60, 67):
+		cv2.line(new_img, tuple(keypoints[i]), tuple(keypoints[i+1]), color=c, thickness=th)
+	return new_img
+
+def getOriginalKeypoints(kp_features_mouth, N, tilt, mean):
+	kp_dn = N * kp_features_mouth
+	x, y = kp_dn[:20], kp_dn[20:]
+	c, s = np.cos(tilt), np.sin(tilt)
+	x_dash, y_dash = x*c + y*s, -x*s + y*c
+	kp_tilt = np.hstack((x_dash.reshape((-1,1)), y_dash.reshape((-1, 1))))
+	kp = kp_tilt + mean
+	kp = kp.astype('int')
+#     print(kp)
+	return kp
     

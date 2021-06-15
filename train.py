@@ -16,8 +16,9 @@ import torch.backends.cudnn as cudnn
 from torch.autograd import Variable
 
 from utils import *
-from model import GCN, GAT, SpGCN, SpGAT
- 
+from model import GCN, GAT, SpGCN, SpGAT, FGAT
+import cv2
+
 def main(args):
     
     # 0. initial setting
@@ -70,22 +71,26 @@ def main(args):
     CITESEER_FEATURES = 3703
     CITESEER_CLASSES = 6
     
-    (num_nodes, feature_dim, classes) = (CORA_NODES, CORA_FEATURES, CORA_CLASSES) if args.dataset == 'cora' else (CITESEER_NODES, CITESEER_FEATURES, CITESEER_CLASSES)
+#     (num_nodes, feature_dim, classes) = (CORA_NODES, CORA_FEATURES, CORA_CLASSES) if args.dataset == 'cora' else (CITESEER_NODES, CITESEER_FEATURES, CITESEER_CLASSES)
+    (num_nodes, feature_dim, classes) = adj.shape[1], features.shape[1], labels.shape[1]
     args.logger.info("setting up...")
-    model = GCN(args, feature_dim, args.hidden, classes, args.dropout) if args.model == 'gcn' else SpGAT(args, feature_dim, args.hidden, classes, args.dropout, args.alpha, args.n_heads)
+#     model = GCN(args, feature_dim, args.hidden, classes, args.dropout) if args.model == 'gcn' else SpGAT(args, feature_dim, args.hidden, classes, args.dropout, args.alpha, args.n_heads)
+    model = FGAT(args, feature_dim, args.hidden, classes, args.dropout, args.alpha, args.n_heads)
     model.to(args.device)
-    loss_fn = nn.NLLLoss()
+#     loss_fn = nn.NLLLoss()
+    loss_fn = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     if args.load:
     	loaded_data = load(args, args.ckpt)
     	model.load_state_dict(loaded_data['model'])
-    	optimizer.load_state_dict(loaded_data['optimizer'])
+#     	optimizer.load_state_dict(loaded_data['optimizer'])
 
     # 3. train / test
     
     if not args.test:
         # train
+        best_acc = 100
         args.logger.info("starting training")
         train_loss_meter = AverageMeter(args, name="Loss", save_all=True, x_label="epoch")
         val_acc_meter = AverageMeter(args, name="Val Acc", save_all=True, x_label="epoch")
@@ -102,6 +107,7 @@ def main(args):
                     continue
             optimizer.zero_grad()
             batch = len(idx_train)
+            
             output = model(features.to(args.device), adj.to(args.device))
             loss = loss_fn(output[idx_train], labels[idx_train].to(args.device))
             loss.backward()
@@ -111,18 +117,25 @@ def main(args):
 
             train_loss_meter.update(train_loss_tmp_meter.avg)
             spent_time = time.time() - spent_time
-            args.logger.info("[{}] train loss: {:.3f} took {:.1f} seconds".format(epoch, train_loss_tmp_meter.avg, spent_time))
+            args.logger.info("[{}] train loss: {:.5f} took {:.1f} seconds".format(epoch, train_loss_tmp_meter.avg, spent_time))
             
             model.eval()
             spent_time = time.time()
             if not args.fastmode:
                 with torch.no_grad():
                     output = model(features.to(args.device), adj.to(args.device))
-            acc = accuracy(output[idx_val], labels[idx_val]) * 100.0
+#             acc = accuracy(output[idx_val], labels[idx_val]) * 100.0
+
+            acc = loss_fn(output[idx_val], labels[idx_val].to(args.device))
             val_acc_meter.update(acc)
             earlystop = earlystop_listener.listen()
             spent_time = time.time() - spent_time
-            args.logger.info("[{}] val acc: {:2.1f} % took {:.1f} seconds".format(epoch, acc, spent_time))
+            torch.cuda.empty_cache()
+            args.logger.info("[{}] val loss: {:.5f} took {:.1f} seconds".format(epoch, acc, spent_time))
+            if acc < best_acc:
+                best_acc = acc
+                args.logger.info("best record saved")
+                save(args, "best".format(epoch), {'model': model.state_dict()})
             if steps % args.save_period == 0:
                 save(args, "epoch{}".format(epoch), {'model': model.state_dict()})
                 train_loss_meter.plot(scatter=False)
@@ -135,11 +148,35 @@ def main(args):
     else:
         # test
         args.logger.info("starting test")
+        f = open('data/face/PCA.pickle', 'rb')
+        pca = pkl.load(f)
+        f = open('data/face/rawKp.pickle', 'rb')
+        rawKps = pkl.load(f)
+        f = open('data/face/config.txt', 'r')
+        test_nodes = f.readlines()
         model.eval()
+        spent_time = time.time()
         with torch.no_grad():
-            model(features.to(args.device), adj.to(args.device))
-        acc = accuracy(output[idx_test], labels[idx_test]) * 100
-        logger.d("test acc: {:2.1f} % took {:.1f} seconds".format(acc, spent_time))
+            output = model(features.to(args.device), adj.to(args.device))
+        reduced_kp = output[idx_test]
+        for idx in range(len(reduced_kp)):
+            rkp = reduced_kp[idx][np.newaxis, :]
+            tmp = test_nodes[idx].strip().split('/')
+            vid, id = tmp[0], tmp[1]
+            _, N, theta, mean, _, all_kp = rawKps[vid][id]
+            normed_kp = pca.inverse_transform(rkp.detach().cpu().numpy())[0]
+            fake_kp = getOriginalKeypoints(normed_kp, N, theta, mean)
+            all_kp[48:68] = fake_kp
+
+#             save_name = os.path.join(result, id + '.txt')
+#             np.savetxt(save_name, all_ldmk, fmt='%d', delimiter=',')
+            img = cv2.imread(os.path.join('../datasets/test/0_2.mp4/img', id + '.png'))
+            img = drawLips(all_kp, img)
+            cv2.imwrite(os.path.join('./results', 'test', id + '.png'), img)
+
+        acc = loss_fn(output[idx_test], labels[idx_test].to(args.device))
+        spent_time = time.time() - spent_time
+        args.logger.info("test loss: {:.5f}  took {:.1f} seconds".format(acc, spent_time))
         
 
 if __name__  == "__main__":
@@ -150,17 +187,17 @@ if __name__  == "__main__":
     parser.add_argument('--fastmode', action='store_true', default=False, help='Validate during training pass.')
     parser.add_argument('--sparse', action='store_true', default=False, help='GAT with sparse version or not.')
     parser.add_argument('--seed', type=int, default=72, help='Random seed.')
-    parser.add_argument('--epochs', type=int, default=1000, help='Number of epochs to train.')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs to train.')
     parser.add_argument('--save_every', type=int, default=10, help='Save every n epochs')
-    parser.add_argument('--lr', type=float, default=0.005, help='Initial learning rate.')
-    parser.add_argument('--weight_decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
+    parser.add_argument('--lr', type=float, default=0.01, help='Initial learning rate.')
+    parser.add_argument('--weight_decay', type=float, default=0, help='Weight decay (L2 loss on parameters).')
     parser.add_argument('--hidden', type=int, default=64, help='Number of hidden units.')
     parser.add_argument('--n_heads', type=int, default=8, help='Number of head attentions.')
     parser.add_argument('--dropout', type=float, default=0.6, help='Dropout rate (1 - keep probability).')
     parser.add_argument('--alpha', type=float, default=0.2, help='Alpha for the leaky_relu.')
-    parser.add_argument('--patience', type=int, default=10, help='patience')
-    parser.add_argument('--dataset', type=str, default='cora', choices=['cora','citeseer'], help='Dataset to train.')
-    parser.add_argument('--model', type=str, default='gcn', choices=['gcn','gat'], help='Model to use.')
+    parser.add_argument('--patience', type=int, default=100, help='patience')
+    parser.add_argument('--dataset', type=str, default='face', choices=['cora','citeseer', 'face'], help='Dataset to train.')
+    parser.add_argument('--model', type=str, default='gat', choices=['gcn','gat'], help='Model to use.')
 
     parser.add_argument(
         '--data_dir',
@@ -188,7 +225,7 @@ if __name__  == "__main__":
     parser.add_argument(
         '--save_period',
         type=int,
-        default=2)
+        default=10)
     parser.add_argument(
         '--name',
         type=str,
@@ -196,7 +233,7 @@ if __name__  == "__main__":
     parser.add_argument(
         '--ckpt',
         type=str,
-        default='_')
+        default='best')
     parser.add_argument(
         '--load',
         action='store_true')

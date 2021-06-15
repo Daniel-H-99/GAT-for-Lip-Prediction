@@ -69,6 +69,8 @@ class SparsemmFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, indices, values, shape, b):
         a = torch.sparse_coo_tensor(indices, values, shape)
+        print(a.shape)
+        print(b.shape)
         ctx.rowsize = shape[0]
         ctx.save_for_backward(a, b)
         return torch.mm(a.cpu(), b).cuda()
@@ -132,10 +134,10 @@ class SparseGraphAttentionLayer(nn.Module):
         attn = self.dropout(torch.bmm(output, self.attn_weights).view(self.num_heads * N, 2))
         attn_values = self.LeakyReLU(attn[adj_indices[0], 0] + attn[adj_indices[1], 1])
         attn_values = attn_values.exp()
-        attn = (torch.mm(torch.sparse_coo_tensor(adj_indices, attn_values, adj.shape).cpu(), torch.eye(adj.shape[0])) / self.Sparsemm(adj_indices, attn_values, adj.shape, torch.ones(N * self.num_heads, 1)).cpu()).cuda()
-        attn_values = attn[adj_indices]
+        attn = (torch.mm(torch.sparse_coo_tensor(adj_indices, attn_values, adj.shape).cpu(), torch.eye(adj.shape[0])) / self.Sparsemm(adj_indices, attn_values, adj.shape, torch.ones(N * self.num_heads, 1)).cpu())
+        attn_values = attn[adj_indices.cpu().numpy()]
         # aggretation
-        output = self.dropout(self.Sparsemm(adj_indices, attn_values, adj.shape, output))
+        output = self.dropout(self.Sparsemm(adj_indices, attn_values.to(self.args.device), adj.shape, output.cpu()))
         output = output.view(self.num_heads, N, self.out_features).transpose(0, 1)
         
         if self.concat:

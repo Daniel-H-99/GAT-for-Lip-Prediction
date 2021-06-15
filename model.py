@@ -31,6 +31,18 @@ class GAT(nn.Module):
         output = self.LogSoftmax(self.layer2(output, adj))
         return output
 
+class FGAT(nn.Module):
+    def __init__(self, args, nfeat, nhid, nclass, dropout, alpha, nheads):
+        super(FGAT, self).__init__()
+        self.layer1 = GraphAttentionLayer(args, nfeat, nhid, nheads, dropout, alpha)
+        self.layer2 = GraphAttentionLayer(args, nhid, nclass, 1, dropout, alpha)
+        self.ReLU = nn.ReLU()      
+
+    def forward(self, x, adj):
+        output = self.ReLU(self.layer1(x, adj))
+        output = self.layer2(output, adj)
+        return output
+    
 # TODO step 3.
 class SpGCN(nn.Module):
     def __init__(self, nfeat, nhid, nclass, dropout):
